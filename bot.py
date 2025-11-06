@@ -406,9 +406,17 @@ class PrioritySelect(discord.ui.Select):
             conn.close()
             await interaction.response.send_message("Only opener or staff can set priority.", ephemeral=True)
             return
+        # Acknowledge quickly to avoid token expiry, we'll edit the ephemeral message after
+        try:
+            await interaction.response.defer_update()
+        except Exception:
+            pass
         # No-op if priority unchanged
         if (t["priority"] or "").casefold() == pr.casefold():
-            await interaction.response.edit_message(content=f"Priority already {pr}.", view=None)
+            try:
+                await interaction.message.edit(content=f"Priority already {pr}.", view=None)  # type: ignore
+            except Exception:
+                pass
             conn.close()
             return
         # Server-side cooldown per channel
@@ -418,7 +426,10 @@ class PrioritySelect(discord.ui.Select):
             last = last_priority_change_at.get(cid, 0)
             remain = int(PRIORITY_CHANGE_COOLDOWN_SECONDS - (now_ts - last))
             if remain > 0:
-                await interaction.response.edit_message(content=f"Please wait {remain}s before changing priority again.", view=None)
+                try:
+                    await interaction.message.edit(content=f"Please wait {remain}s before changing priority again.", view=None)  # type: ignore
+                except Exception:
+                    pass
                 conn.close()
                 return
         cur.execute("UPDATE tickets SET priority = ? WHERE id = ?", (pr, t["id"]))
@@ -466,7 +477,10 @@ class PrioritySelect(discord.ui.Select):
         # Record last change time for cooldown
         if cid is not None:
             last_priority_change_at[cid] = time.time()
-        await interaction.response.edit_message(content=f"Priority updated to {pr}.", view=None)
+        try:
+            await interaction.message.edit(content=f"Priority updated to {pr}.", view=None)  # type: ignore
+        except Exception:
+            pass
 
 
 class PrioritySelectView(discord.ui.View):
@@ -563,6 +577,11 @@ class TicketView(discord.ui.View):
             conn.close()
             await interaction.response.send_message("Ticket already closed.", ephemeral=True)
             return
+        # Ack quickly to avoid interaction timeout during edits/deletes
+        try:
+            await interaction.response.defer_update()
+        except Exception:
+            pass
         cur.execute(
             "UPDATE tickets SET status = 'closed', closed_at = ?, admin_closer_id = ? WHERE id = ?",
             (int(time.time()), interaction.user.id, t["id"]),
@@ -585,7 +604,10 @@ class TicketView(discord.ui.View):
                         await ch.edit(overwrites=overwrites, name=f"🟢-{base}", topic="Status: 🟢 Solved | Closed", reason="Ticket closed")
                     except discord.HTTPException:
                         await ch.edit(overwrites=overwrites, topic="Status: 🟢 Solved | Closed", reason="Ticket closed")
-            await interaction.response.send_message("Ticket closed.", ephemeral=True)
+            try:
+                await interaction.followup.send("Ticket closed.", ephemeral=True)
+            except Exception:
+                pass
             await interaction.channel.send("This ticket is now closed. Deleting channel in a few seconds. Thank you!")
             async def _delete_later(channel: discord.abc.GuildChannel):
                 try:
@@ -597,7 +619,10 @@ class TicketView(discord.ui.View):
             if isinstance(ch, discord.TextChannel):
                 asyncio.create_task(_delete_later(ch))
         except Exception:
-            await interaction.response.send_message("Ticket closed, but failed to update permissions.", ephemeral=True)
+            try:
+                await interaction.followup.send("Ticket closed, but failed to update permissions.", ephemeral=True)
+            except Exception:
+                pass
 
     @discord.ui.button(label="Set Priority", style=discord.ButtonStyle.secondary, custom_id="ticket_set_priority")
     async def set_priority(self, interaction: discord.Interaction, button: discord.ui.Button):
