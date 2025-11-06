@@ -780,6 +780,13 @@ async def set_staff_role(interaction: discord.Interaction, role: discord.Role):
     await interaction.response.send_message(f"Staff role set to {role.mention}", ephemeral=True)
 
 
+@admin_group.command(name="remove_staff_role", description="Remove/unset the configured staff role")
+@require_admin()
+async def remove_staff_role(interaction: discord.Interaction):
+    upsert_config(interaction.guild_id, staff_role_id=None)
+    await interaction.response.send_message("Staff role has been unset. Only server owner or Manage Server can confirm close.", ephemeral=True)
+
+
 @admin_group.command(name="set_panel", description="Set panel title/description/contact name")
 @require_admin()
 async def set_panel(interaction: discord.Interaction, title: str, description: str, contact_name: str):
