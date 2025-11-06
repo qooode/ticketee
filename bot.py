@@ -262,11 +262,15 @@ def slugify_username(name: str) -> str:
     return s[:50] if s else "user"
 
 
-def is_admin_like(member: discord.Member, guild_cfg: Dict[str, Any]) -> bool:
+def is_admin(member: discord.Member) -> bool:
     if member.guild.owner_id == member.id:
         return True
     if member.guild_permissions.manage_guild:
         return True
+    return False
+
+
+def is_staff(member: discord.Member, guild_cfg: Dict[str, Any]) -> bool:
     staff_role_id = guild_cfg.get("staff_role_id")
     if staff_role_id:
         role = discord.utils.get(member.roles, id=int(staff_role_id))
@@ -372,7 +376,7 @@ class PrioritySelect(discord.ui.Select):
             await interaction.response.send_message("Not a ticket channel.", ephemeral=True)
             return
         cfg = get_config(interaction.guild.id)
-        allow = (int(t["opener_id"]) == interaction.user.id) or is_admin_like(interaction.user, cfg)  # type: ignore
+        allow = (int(t["opener_id"]) == interaction.user.id) or is_admin(interaction.user) or is_staff(interaction.user, cfg)  # type: ignore
         if not allow:
             conn.close()
             await interaction.response.send_message("Only opener or staff can set priority.", ephemeral=True)
@@ -501,7 +505,7 @@ class TicketView(discord.ui.View):
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             return
         cfg = get_config(interaction.guild.id)
-        if not is_admin_like(interaction.user, cfg):
+        if not (is_admin(interaction.user) or is_staff(interaction.user, cfg)):
             await interaction.response.send_message("You are not allowed to close this ticket.", ephemeral=True)
             return
         conn = get_conn()
@@ -566,8 +570,8 @@ class TicketView(discord.ui.View):
             await interaction.response.send_message("Not a ticket channel.", ephemeral=True)
             return
         cfg = get_config(interaction.guild.id)
-        is_staff = is_admin_like(interaction.user, cfg)
-        if not is_staff and int(t["opener_id"]) != interaction.user.id:
+        staff_ok = is_staff(interaction.user, cfg) or is_admin(interaction.user)
+        if not staff_ok and int(t["opener_id"]) != interaction.user.id:
             await interaction.response.send_message("Only the opener or staff can change priority.", ephemeral=True)
             return
 
@@ -749,8 +753,7 @@ admin_group = app_commands.Group(name="admin", description="Admin commands")
 def admin_check(interaction: discord.Interaction) -> bool:
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
         return False
-    cfg = get_config(interaction.guild.id)
-    return is_admin_like(interaction.user, cfg)
+    return is_admin(interaction.user)
 
 
 def require_admin():

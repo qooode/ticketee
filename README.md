@@ -42,8 +42,9 @@ Set these environment variables (Coolify or local):
 ## Admin Commands
 All commands are under `/admin` and require either:
 - Server owner, or
-- `Manage Server` permission, or
-- Member has the configured staff role
+- `Manage Server` permission
+
+Note: The configured staff role does NOT grant access to `/admin` commands. Staff can use ticket buttons (Set Priority, Confirm Close) but cannot change bot configuration.
 
 Commands:
 - `/admin set_support_channel <#channel>` — where the panel is posted
