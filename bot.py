@@ -662,9 +662,11 @@ async def list_config(interaction: discord.Interaction):
     cfg = get_config(interaction.guild_id)
     cats = list_categories(interaction.guild_id)
     lines = []
-    lines.append(f"Support channel: {f'<#{cfg["support_channel_id"]}>' if cfg.get('support_channel_id') else 'not set'}")
+    support_ch = f"<#{cfg['support_channel_id']}>" if cfg.get('support_channel_id') else 'not set'
+    staff_role = f"<@&{cfg['staff_role_id']}>" if cfg.get('staff_role_id') else 'not set'
+    lines.append(f"Support channel: {support_ch}")
     lines.append(f"Ticket parent category: {cfg.get('ticket_category_id') or 'not set'}")
-    lines.append(f"Staff role: {f'<@&{cfg["staff_role_id"]}>' if cfg.get('staff_role_id') else 'not set'}")
+    lines.append(f"Staff role: {staff_role}")
     lines.append(f"Panel title: {cfg.get('panel_title') or '(default)'}")
     lines.append(f"Contact name: {cfg.get('contact_name') or '(default)'}")
     lines.append("")
@@ -794,4 +796,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
