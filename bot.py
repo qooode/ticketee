@@ -1037,6 +1037,107 @@ async def set_ticket_priority(interaction: discord.Interaction, priority: app_co
     await interaction.response.send_message(f"Priority set to {priority.value}.", ephemeral=True)
 
 
+@admin_group.command(name="add_ticket_role", description="Grant a role access to this ticket")
+@require_admin()
+async def add_ticket_role(interaction: discord.Interaction, role: discord.Role):
+    if not interaction.channel or not interaction.guild:
+        await interaction.response.send_message("Use this in a ticket channel.", ephemeral=True)
+        return
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM tickets WHERE channel_id = ?", (interaction.channel.id,))
+    t = cur.fetchone()
+    conn.close()
+    if not t:
+        await interaction.response.send_message("This is not a ticket channel.", ephemeral=True)
+        return
+    ch = interaction.channel
+    if isinstance(ch, discord.TextChannel):
+        overwrites = ch.overwrites
+        overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+        try:
+            await ch.edit(overwrites=overwrites, reason="Grant role access to ticket")
+            await interaction.response.send_message(f"Granted {role.mention} access to this ticket.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"Failed to grant role: {e}", ephemeral=True)
+    else:
+        await interaction.response.send_message("Unsupported channel type.", ephemeral=True)
+
+
+@admin_group.command(name="remove_ticket_role", description="Remove a role's access from this ticket")
+@require_admin()
+async def remove_ticket_role(interaction: discord.Interaction, role: discord.Role):
+    if not interaction.channel or not interaction.guild:
+        await interaction.response.send_message("Use this in a ticket channel.", ephemeral=True)
+        return
+    cfg = get_config(interaction.guild.id)
+    staff_role_id = cfg.get("staff_role_id")
+    if staff_role_id and int(staff_role_id) == role.id:
+        await interaction.response.send_message("Refusing to remove the configured staff role here. Use /admin set_staff_role to change it.", ephemeral=True)
+        return
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM tickets WHERE channel_id = ?", (interaction.channel.id,))
+    t = cur.fetchone()
+    conn.close()
+    if not t:
+        await interaction.response.send_message("This is not a ticket channel.", ephemeral=True)
+        return
+    ch = interaction.channel
+    if isinstance(ch, discord.TextChannel):
+        overwrites = ch.overwrites
+        if role in overwrites:
+            try:
+                del overwrites[role]
+                await ch.edit(overwrites=overwrites, reason="Revoke role access from ticket")
+                await interaction.response.send_message(f"Removed {role.mention} from this ticket.", ephemeral=True)
+            except Exception as e:
+                await interaction.response.send_message(f"Failed to remove role: {e}", ephemeral=True)
+        else:
+            await interaction.response.send_message("No explicit permission override found for that role.", ephemeral=True)
+    else:
+        await interaction.response.send_message("Unsupported channel type.", ephemeral=True)
+
+
+@admin_group.command(name="reconcile_tickets", description="Close missing ticket channels; optional close all")
+@require_admin()
+async def reconcile_tickets(interaction: discord.Interaction, close_all: bool = False, delete_channels: bool = False):
+    if not interaction.guild:
+        await interaction.response.send_message("Run this in a server.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id, channel_id, status, opener_id FROM tickets WHERE guild_id = ? AND status != 'closed'", (guild.id,))
+    rows = cur.fetchall()
+    closed_missing = 0
+    closed_all = 0
+    for r in rows:
+        ch = guild.get_channel(int(r["channel_id"]))
+        if ch is None or not isinstance(ch, discord.TextChannel):
+            cur.execute("UPDATE tickets SET status='closed', closed_at=? WHERE id=?", (int(time.time()), r["id"]))
+            closed_missing += 1
+        elif close_all:
+            try:
+                await ch.send("Closing by admin reconcile.")
+            except Exception:
+                pass
+            cur.execute("UPDATE tickets SET status='closed', closed_at=? WHERE id=?", (int(time.time()), r["id"]))
+            closed_all += 1
+            if delete_channels:
+                try:
+                    await ch.delete(reason="Closed by admin reconcile")
+                except Exception:
+                    pass
+    conn.commit()
+    conn.close()
+    await interaction.followup.send(
+        f"Reconcile done. Closed missing: {closed_missing}.{' Closed open: ' + str(closed_all) if close_all else ''}",
+        ephemeral=True,
+    )
+
+
 @bot.event
 async def on_ready():
     # Register persistent views for button handling across restarts
