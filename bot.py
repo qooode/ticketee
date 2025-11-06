@@ -34,6 +34,36 @@ def get_conn() -> sqlite3.Connection:
     return conn
 
 
+async def try_edit_channel(
+    ch: discord.TextChannel,
+    *,
+    name: Optional[str] = None,
+    topic: Optional[str] = None,
+    overwrites: Optional[Dict[Any, Any]] = None,
+    reason: Optional[str] = None,
+    timeout: float = 3.0,
+) -> bool:
+    """Attempt a channel edit but bail out quickly if rate-limited.
+    Returns True on success, False on timeout or HTTP error.
+    """
+    try:
+        kwargs: Dict[str, Any] = {}
+        if name is not None:
+            kwargs["name"] = name
+        if topic is not None:
+            kwargs["topic"] = topic
+        if overwrites is not None:
+            kwargs["overwrites"] = overwrites
+        if reason is not None:
+            kwargs["reason"] = reason
+        await asyncio.wait_for(ch.edit(**kwargs), timeout=timeout)
+        return True
+    except (asyncio.TimeoutError, discord.HTTPException):
+        return False
+    except Exception:
+        return False
+
+
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
@@ -412,7 +442,7 @@ class PrioritySelect(discord.ui.Select):
         # No-op if priority unchanged
         if (t["priority"] or "").casefold() == pr.casefold():
             try:
-                await interaction.message.edit(content=f"Priority already {pr}.", view=None)  # type: ignore
+                await interaction.edit_original_response(content=f"Priority already {pr}.")
             except Exception:
                 pass
             conn.close()
@@ -421,7 +451,7 @@ class PrioritySelect(discord.ui.Select):
         ch = interaction.channel
         if not isinstance(ch, discord.TextChannel):
             try:
-                await interaction.message.edit(content="This is not a text channel.", view=None)  # type: ignore
+                await interaction.edit_original_response(content="This is not a text channel.")
             except Exception:
                 pass
             conn.close()
@@ -436,20 +466,10 @@ class PrioritySelect(discord.ui.Select):
         else:
             new_topic = f"Priority: {priority_emoji(pr)} {pr}"
             new_name = f"{priority_emoji(pr)}-{base}"
-        try:
-            await ch.edit(name=new_name, topic=new_topic)
-        except discord.HTTPException as e:
-            # Do not persist; allow user to retry
-            msg = "Rate limited; please retry in a few minutes." if getattr(e, "status", None) == 429 else "Failed to update channel; please retry."
+        ok = await try_edit_channel(ch, name=new_name, topic=new_topic)
+        if not ok:
             try:
-                await interaction.message.edit(content=msg, view=None)  # type: ignore
-            except Exception:
-                pass
-            conn.close()
-            return
-        except Exception:
-            try:
-                await interaction.message.edit(content="Failed to update channel; please retry.", view=None)  # type: ignore
+                await interaction.edit_original_response(content="Rate limited; please retry in a few minutes.")
             except Exception:
                 pass
             conn.close()
@@ -482,7 +502,7 @@ class PrioritySelect(discord.ui.Select):
         except Exception:
             pass
         try:
-            await interaction.message.edit(content=f"Priority updated to {pr}.", view=None)  # type: ignore
+            await interaction.edit_original_response(content=f"Priority updated to {pr}.")
         except Exception:
             pass
 
@@ -540,10 +560,9 @@ class TicketView(discord.ui.View):
                 base = ch.name
                 if base[:1] in ("⚪", "🟡", "🟠", "🔴", "🟢") and base.startswith(base[:1] + "-"):
                     base = base.split("-", 1)[1]
-                try:
-                    await ch.edit(name=f"🟢-{base}", topic="Status: 🟢 Solved (pending staff confirmation)")
-                except discord.HTTPException:
-                    await ch.edit(topic="Status: 🟢 Solved (pending staff confirmation)")
+                ok = await try_edit_channel(ch, name=f"🟢-{base}", topic="Status: 🟢 Solved (pending staff confirmation)")
+                if not ok:
+                    await try_edit_channel(ch, topic="Status: 🟢 Solved (pending staff confirmation)")
                 try:
                     if t.get("first_message_id"):
                         msg = await ch.fetch_message(int(t["first_message_id"]))
@@ -603,29 +622,24 @@ class TicketView(discord.ui.View):
             base = base.split("-", 1)[1]
         if opener and isinstance(ch, discord.TextChannel):
             overwrites[opener] = discord.PermissionOverwrite(view_channel=True, send_messages=False)
-        try:
-            if isinstance(ch, discord.TextChannel):
-                await ch.edit(
-                    overwrites=overwrites,
-                    name=f"🟢-{base}",
-                    topic="Status: 🟢 Solved | Closed",
-                    reason="Ticket close request",
-                )
-            else:
-                # Threads: cannot rename, but can archive/lock; keep it simple: send failure to retry
-                await ch.edit(locked=True, archived=True, reason="Ticket close request")  # type: ignore
-        except discord.HTTPException as e:
-            # Do not persist; allow retry if rate-limited or any failure occurs
-            msg = "Rate limited; please retry in a few minutes." if getattr(e, "status", None) == 429 else "Failed to update channel; please retry."
+        ok = False
+        if isinstance(ch, discord.TextChannel):
+            ok = await try_edit_channel(
+                ch,
+                overwrites=overwrites,
+                name=f"🟢-{base}",
+                topic="Status: 🟢 Solved | Closed",
+                reason="Ticket close request",
+            )
+        else:
             try:
-                await interaction.followup.send(msg, ephemeral=True)
+                await asyncio.wait_for(ch.edit(locked=True, archived=True, reason="Ticket close request"), timeout=3.0)  # type: ignore
+                ok = True
             except Exception:
-                pass
-            conn.close()
-            return
-        except Exception:
+                ok = False
+        if not ok:
             try:
-                await interaction.followup.send("Failed to update channel; please retry.", ephemeral=True)
+                await interaction.followup.send("Rate limited; please retry in a few minutes.", ephemeral=True)
             except Exception:
                 pass
             conn.close()
@@ -907,11 +921,9 @@ async def set_staff_role(interaction: discord.Interaction, role: discord.Role):
             if isinstance(ch, discord.TextChannel):
                 overwrites = ch.overwrites
                 overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-                try:
-                    await ch.edit(overwrites=overwrites, reason="Set staff role; grant access")
+                ok = await try_edit_channel(ch, overwrites=overwrites, reason="Set staff role; grant access")
+                if ok:
                     updated += 1
-                except Exception:
-                    pass
     await interaction.response.send_message(f"Staff role set to {role.mention}. Updated {updated} open tickets.", ephemeral=True)
 
 
@@ -939,12 +951,10 @@ async def remove_staff_role(interaction: discord.Interaction, role: discord.Role
             if isinstance(ch, discord.TextChannel):
                 overwrites = ch.overwrites
                 if role in overwrites:
-                    try:
-                        del overwrites[role]
-                        await ch.edit(overwrites=overwrites, reason="Unset staff role; revoke access")
+                    del overwrites[role]
+                    ok = await try_edit_channel(ch, overwrites=overwrites, reason="Unset staff role; revoke access")
+                    if ok:
                         updated += 1
-                    except Exception:
-                        pass
     await interaction.response.send_message(f"Staff role {role.mention} unset. Updated {updated} open tickets.", ephemeral=True)
 
 
@@ -1186,56 +1196,28 @@ async def set_ticket_priority(interaction: discord.Interaction, priority: app_co
     else:
         new_topic = f"Priority: {priority_emoji(priority.value)} {priority.value}"
         new_name = f"{priority_emoji(priority.value)}-{base}"
-    try:
-        await ch.edit(name=new_name, topic=new_topic)
-    except discord.HTTPException as e:
-        msg = "Rate limited; please retry in a few minutes." if getattr(e, "status", None) == 429 else "Failed to update channel; please retry."
-        await interaction.response.send_message(msg, ephemeral=True)
-        conn.close()
-        return
-    except Exception:
-        await interaction.response.send_message("Failed to update channel; please retry.", ephemeral=True)
+    ok = await try_edit_channel(ch, name=new_name, topic=new_topic)
+    if not ok:
+        await interaction.response.send_message("Rate limited; please retry in a few minutes.", ephemeral=True)
         conn.close()
         return
     cur.execute("UPDATE tickets SET priority = ? WHERE id = ?", (priority.value, t["id"]))
     conn.commit()
     conn.close()
-    # Update channel topic if possible
+    # Update first embed's Priority field if available (best-effort)
     try:
-        ch = interaction.channel
-        if isinstance(ch, discord.TextChannel):
-            solved = (t["status"] in ("pending_close", "closed"))
-            base = ch.name
-            if base[:1] in ("⚪", "🟡", "🟠", "🔴", "🟢") and base.startswith(base[:1] + "-"):
-                base = base.split("-", 1)[1]
-            if solved:
-                await ch.edit(topic="Status: 🟢 Solved (pending staff confirmation)" if t["status"] == "pending_close" else "Status: 🟢 Solved | Closed")
-                try:
-                    await ch.edit(name=f"🟢-{base}")
-                except discord.HTTPException:
-                    pass
-            else:
-                await ch.edit(topic=f"Priority: {priority_emoji(priority.value)} {priority.value}")
-                try:
-                    await ch.edit(name=f"{priority_emoji(priority.value)}-{base}")
-                except discord.HTTPException:
-                    pass
-            # Update first embed's Priority field if available
-            try:
-                if t and t["first_message_id"]:
-                    msg = await ch.fetch_message(int(t["first_message_id"]))
-                    if msg.embeds:
-                        e = msg.embeds[0]
-                        new = discord.Embed(title=e.title, description=e.description, color=e.color)
-                        for f in e.fields:
-                            if f.name == "Priority":
-                                val = "🟢 Solved (pending staff confirmation)" if solved and t["status"] == "pending_close" else ("🟢 Solved | Closed" if solved else f"{priority_emoji(priority.value)} {priority.value}")
-                                new.add_field(name="Priority", value=val, inline=True)
-                            else:
-                                new.add_field(name=f.name, value=f.value, inline=f.inline)
-                        await msg.edit(embed=new)
-            except Exception:
-                pass
+        if t and t["first_message_id"] and isinstance(ch, discord.TextChannel):
+            msg = await ch.fetch_message(int(t["first_message_id"]))
+            if msg.embeds:
+                e = msg.embeds[0]
+                new = discord.Embed(title=e.title, description=e.description, color=e.color)
+                for f in e.fields:
+                    if f.name == "Priority":
+                        val = "🟢 Solved (pending staff confirmation)" if solved and t["status"] == "pending_close" else ("🟢 Solved | Closed" if solved else f"{priority_emoji(priority.value)} {priority.value}")
+                        new.add_field(name="Priority", value=val, inline=True)
+                    else:
+                        new.add_field(name=f.name, value=f.value, inline=f.inline)
+                await msg.edit(embed=new)
     except Exception:
         pass
     await interaction.response.send_message(f"Priority set to {priority.value}.", ephemeral=True)
