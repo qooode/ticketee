@@ -343,7 +343,28 @@ class PanelSelect(discord.ui.Select):
             return
         fields = get_fields_for_category(cat_id)
         modal = TicketModal(category, fields)
+        # Open the modal for the user
         await interaction.response.send_modal(modal)
+
+        # Workaround for Discord client select menus staying visually "stuck":
+        # Refresh the panel message's view so the select resets for everyone.
+        try:
+            if interaction.message and interaction.guild:
+                cats = list_categories(interaction.guild.id)
+                # Rebuild options from current categories (max 25)
+                options: List[discord.SelectOption] = []
+                for c in cats[:25]:
+                    options.append(
+                        discord.SelectOption(
+                            label=c["name"],
+                            description=(c["placeholder"] or "")[:100],
+                            value=f"cat:{c['id']}",
+                        )
+                    )
+                await interaction.message.edit(view=PanelView(options))
+        except Exception:
+            # Non-fatal if we cannot edit (e.g., missing perms or race)
+            pass
 
 
 class PanelView(discord.ui.View):
