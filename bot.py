@@ -806,31 +806,35 @@ async def set_staff_role(interaction: discord.Interaction, role: discord.Role):
 
 @admin_group.command(name="remove_staff_role", description="Unset the staff role and revoke it from open tickets")
 @require_admin()
-async def remove_staff_role(interaction: discord.Interaction):
+async def remove_staff_role(interaction: discord.Interaction, role: discord.Role):
     cfg = get_config(interaction.guild_id)
     old_role_id = cfg.get("staff_role_id")
+    if not old_role_id:
+        await interaction.response.send_message("No staff role is configured.", ephemeral=True)
+        return
+    if int(old_role_id) != role.id:
+        await interaction.response.send_message(f"{role.mention} is not the configured staff role.", ephemeral=True)
+        return
     upsert_config(interaction.guild_id, staff_role_id=None)
     updated = 0
-    if old_role_id and interaction.guild:
-        role = interaction.guild.get_role(int(old_role_id))
-        if role:
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute("SELECT channel_id FROM tickets WHERE guild_id = ? AND status != 'closed'", (interaction.guild.id,))
-            chans = [int(r[0]) for r in cur.fetchall()]
-            conn.close()
-            for cid in chans:
-                ch = interaction.guild.get_channel(cid)
-                if isinstance(ch, discord.TextChannel):
-                    overwrites = ch.overwrites
-                    if role in overwrites:
-                        try:
-                            del overwrites[role]
-                            await ch.edit(overwrites=overwrites, reason="Unset staff role; revoke access")
-                            updated += 1
-                        except Exception:
-                            pass
-    await interaction.response.send_message(f"Staff role unset. Updated {updated} open tickets.", ephemeral=True)
+    if interaction.guild:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT channel_id FROM tickets WHERE guild_id = ? AND status != 'closed'", (interaction.guild.id,))
+        chans = [int(r[0]) for r in cur.fetchall()]
+        conn.close()
+        for cid in chans:
+            ch = interaction.guild.get_channel(cid)
+            if isinstance(ch, discord.TextChannel):
+                overwrites = ch.overwrites
+                if role in overwrites:
+                    try:
+                        del overwrites[role]
+                        await ch.edit(overwrites=overwrites, reason="Unset staff role; revoke access")
+                        updated += 1
+                    except Exception:
+                        pass
+    await interaction.response.send_message(f"Staff role {role.mention} unset. Updated {updated} open tickets.", ephemeral=True)
 
 
 @admin_group.command(name="set_panel", description="Set panel title/description/contact name")
