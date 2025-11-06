@@ -49,7 +49,7 @@ Commands:
 - `/admin set_support_channel <#channel>` — where the panel is posted
 - `/admin set_ticket_category <category>` — parent category for ticket channels
 - `/admin set_staff_role <@role>` — staff that can view and confirm close
-- `/admin remove_staff_role [apply_to_open]` — unset the staff role and revoke it from open tickets (default true)
+- `/admin remove_staff_role` — unset the staff role and revoke it from open tickets
   (Only one managing role is supported: set or remove the staff role.)
 - `/admin set_panel <title> <description> <contact_name>` — panel copy
 - `/admin add_category <name> [placeholder]` — adds a ticket category

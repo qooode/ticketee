@@ -776,21 +776,39 @@ async def set_ticket_category(interaction: discord.Interaction, category: discor
     await interaction.response.send_message(f"Ticket parent category set to {category.name}", ephemeral=True)
 
 
-@admin_group.command(name="set_staff_role", description="Set the staff role that can see tickets and close them")
+@admin_group.command(name="set_staff_role", description="Set the staff role; grants access to all open tickets")
 @require_admin()
 async def set_staff_role(interaction: discord.Interaction, role: discord.Role):
     upsert_config(interaction.guild_id, staff_role_id=role.id)
-    await interaction.response.send_message(f"Staff role set to {role.mention}", ephemeral=True)
+    # Grant access on all open ticket channels
+    updated = 0
+    if interaction.guild:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT channel_id FROM tickets WHERE guild_id = ? AND status != 'closed'", (interaction.guild.id,))
+        chans = [int(r[0]) for r in cur.fetchall()]
+        conn.close()
+        for cid in chans:
+            ch = interaction.guild.get_channel(cid)
+            if isinstance(ch, discord.TextChannel):
+                overwrites = ch.overwrites
+                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+                try:
+                    await ch.edit(overwrites=overwrites, reason="Set staff role; grant access")
+                    updated += 1
+                except Exception:
+                    pass
+    await interaction.response.send_message(f"Staff role set to {role.mention}. Updated {updated} open tickets.", ephemeral=True)
 
 
-@admin_group.command(name="remove_staff_role", description="Unset the staff role and optionally revoke it from open tickets")
+@admin_group.command(name="remove_staff_role", description="Unset the staff role and revoke it from open tickets")
 @require_admin()
-async def remove_staff_role(interaction: discord.Interaction, apply_to_open: bool = True):
+async def remove_staff_role(interaction: discord.Interaction):
     cfg = get_config(interaction.guild_id)
     old_role_id = cfg.get("staff_role_id")
     upsert_config(interaction.guild_id, staff_role_id=None)
     updated = 0
-    if apply_to_open and old_role_id and interaction.guild:
+    if old_role_id and interaction.guild:
         role = interaction.guild.get_role(int(old_role_id))
         if role:
             conn = get_conn()
@@ -809,10 +827,7 @@ async def remove_staff_role(interaction: discord.Interaction, apply_to_open: boo
                             updated += 1
                         except Exception:
                             pass
-    await interaction.response.send_message(
-        f"Staff role unset. Updated {updated} open tickets." if apply_to_open else "Staff role unset.",
-        ephemeral=True,
-    )
+    await interaction.response.send_message(f"Staff role unset. Updated {updated} open tickets.", ephemeral=True)
 
 
 @admin_group.command(name="set_panel", description="Set panel title/description/contact name")
