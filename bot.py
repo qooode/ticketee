@@ -108,7 +108,8 @@ def init_db():
             priority TEXT DEFAULT 'Low',
             created_at INTEGER,
             closed_at INTEGER,
-            admin_closer_id INTEGER
+            admin_closer_id INTEGER,
+            first_message_id INTEGER
         )
         """
     )
@@ -137,7 +138,9 @@ def init_db():
         cols = {r[1] for r in cur.fetchall()}
         if "priority" not in cols:
             cur.execute("ALTER TABLE tickets ADD COLUMN priority TEXT DEFAULT 'Low'")
-            conn.commit()
+        if "first_message_id" not in cols:
+            cur.execute("ALTER TABLE tickets ADD COLUMN first_message_id INTEGER")
+        conn.commit()
     except Exception:
         pass
     conn.close()
@@ -378,7 +381,31 @@ class PrioritySelect(discord.ui.Select):
         try:
             ch = interaction.channel
             if isinstance(ch, discord.TextChannel):
+                # Update topic
                 await ch.edit(topic=f"Priority: {priority_emoji(pr)} {pr}")
+                # Update channel name to include emoji prefix if possible
+                base = ch.name
+                if base[:1] in ("⚪", "🟡", "🟠", "🔴") and base.startswith(base[:1] + "-"):
+                    base = base.split("-", 1)[1]
+                try:
+                    await ch.edit(name=f"{priority_emoji(pr)}-{base}")
+                except discord.HTTPException:
+                    pass
+                # Update first embed's Priority field if we have it
+                try:
+                    if t["first_message_id"]:
+                        msg = await ch.fetch_message(int(t["first_message_id"]))
+                        if msg.embeds:
+                            e = msg.embeds[0]
+                            new = discord.Embed(title=e.title, description=e.description, color=e.color)
+                            for f in e.fields:
+                                if f.name == "Priority":
+                                    new.add_field(name="Priority", value=f"{priority_emoji(pr)} {pr}", inline=True)
+                                else:
+                                    new.add_field(name=f.name, value=f.value, inline=f.inline)
+                            await msg.edit(embed=new)
+                except Exception:
+                    pass
             await ch.send(f"Priority set to {pr} by {interaction.user.mention}.")  # type: ignore
         except Exception:
             pass
@@ -395,7 +422,7 @@ class TicketView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Mark as Solved", style=discord.ButtonStyle.primary, custom_id="ticket_mark_solved")
+    @discord.ui.button(label="Mark as Solved", style=discord.ButtonStyle.success, custom_id="ticket_mark_solved")
     async def mark_solved(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             return
@@ -562,8 +589,9 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
         # Default priority is Low; can be changed after channel opens via button or admin command
         priority = "Low"
 
-        # Create channel (put number first to show global sequence clearly)
-        channel_name = f"{slugify_username(interaction.user.display_name)}-{num}"
+        # Create channel name base and include priority emoji as prefix if possible
+        base_name = f"{slugify_username(interaction.user.display_name)}-{num}"
+        name_with_emoji = f"{priority_emoji(priority)}-{base_name}"
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
@@ -582,13 +610,23 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
             if not isinstance(parent, discord.CategoryChannel):
                 parent = None
 
-        channel = await guild.create_text_channel(
-            channel_name,
-            category=parent,
-            overwrites=overwrites,
-            topic=f"Priority: {priority_emoji(priority)} {priority}",
-            reason=f"New support ticket by {interaction.user}"
-        )
+        try:
+            channel = await guild.create_text_channel(
+                name_with_emoji,
+                category=parent,
+                overwrites=overwrites,
+                topic=f"Priority: {priority_emoji(priority)} {priority}",
+                reason=f"New support ticket by {interaction.user}"
+            )
+        except discord.HTTPException:
+            # Fallback if emoji not allowed in channel names
+            channel = await guild.create_text_channel(
+                base_name,
+                category=parent,
+                overwrites=overwrites,
+                topic=f"Priority: {priority_emoji(priority)} {priority}",
+                reason=f"New support ticket by {interaction.user}"
+            )
 
         # Persist ticket row
         conn = get_conn()
@@ -631,10 +669,12 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
         )
 
         view = TicketView()
+        first_msg_id: Optional[int] = None
         try:
-            await channel.send(content=intro, embed=embed, view=view)
+            msg = await channel.send(content=intro, embed=embed, view=view)
+            first_msg_id = msg.id
         except Exception:
-            pass
+            first_msg_id = None
 
         # Log modal submission as first message in DB
         content_dict = {}
@@ -645,6 +685,8 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
             "INSERT INTO messages(ticket_id, discord_message_id, author_id, content, attachments_json, created_at) VALUES (?,?,?,?,?,?)",
             (ticket_id, None, interaction.user.id, json.dumps(content_dict), json.dumps([]), int(time.time())),
         )
+        if first_msg_id is not None:
+            cur.execute("UPDATE tickets SET first_message_id = ? WHERE id = ?", (first_msg_id, ticket_id))
         conn.commit()
         conn.close()
 
@@ -919,8 +961,37 @@ async def set_ticket_priority(interaction: discord.Interaction, priority: app_co
     conn.close()
     # Update channel topic if possible
     try:
-        if isinstance(interaction.channel, discord.TextChannel):
-            await interaction.channel.edit(topic=f"Priority: {priority_emoji(priority.value)} {priority.value}")
+        ch = interaction.channel
+        if isinstance(ch, discord.TextChannel):
+            await ch.edit(topic=f"Priority: {priority_emoji(priority.value)} {priority.value}")
+            base = ch.name
+            if base[:1] in ("⚪", "🟡", "🟠", "🔴") and base.startswith(base[:1] + "-"):
+                base = base.split("-", 1)[1]
+            try:
+                await ch.edit(name=f"{priority_emoji(priority.value)}-{base}")
+            except discord.HTTPException:
+                pass
+            # Update first embed's Priority field if available
+            try:
+                # refetch the ticket row to get first_message_id if not in scope
+                conn2 = get_conn()
+                cur2 = conn2.cursor()
+                cur2.execute("SELECT first_message_id FROM tickets WHERE channel_id = ?", (ch.id,))
+                t2 = cur2.fetchone()
+                conn2.close()
+                if t2 and t2["first_message_id"]:
+                    msg = await ch.fetch_message(int(t2["first_message_id"]))
+                    if msg.embeds:
+                        e = msg.embeds[0]
+                        new = discord.Embed(title=e.title, description=e.description, color=e.color)
+                        for f in e.fields:
+                            if f.name == "Priority":
+                                new.add_field(name="Priority", value=f"{priority_emoji(priority.value)} {priority.value}", inline=True)
+                            else:
+                                new.add_field(name=f.name, value=f.value, inline=f.inline)
+                        await msg.edit(embed=new)
+            except Exception:
+                pass
     except Exception:
         pass
     await interaction.response.send_message(f"Priority set to {priority.value}.", ephemeral=True)
