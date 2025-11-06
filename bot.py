@@ -104,7 +104,7 @@ def init_db():
             channel_id INTEGER,
             category_id INTEGER,
             status TEXT NOT NULL,
-            priority TEXT DEFAULT 'Normal',
+            priority TEXT DEFAULT 'Low',
             created_at INTEGER,
             closed_at INTEGER,
             admin_closer_id INTEGER
@@ -135,7 +135,7 @@ def init_db():
         cur.execute("PRAGMA table_info(tickets)")
         cols = {r[1] for r in cur.fetchall()}
         if "priority" not in cols:
-            cur.execute("ALTER TABLE tickets ADD COLUMN priority TEXT DEFAULT 'Normal'")
+            cur.execute("ALTER TABLE tickets ADD COLUMN priority TEXT DEFAULT 'Low'")
             conn.commit()
     except Exception:
         pass
@@ -474,17 +474,26 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
         self.fields_rows = fields_rows
         # Build inputs
         components = []
-        # Always include priority input first
+        # Always include a larger multi-line field for the main issue
+        default_issue_label = "What's the issue?"
         components.append(
             discord.ui.TextInput(
-                label="Priority (Low/Normal/High/Urgent)",
-                custom_id="priority",
+                label=default_issue_label,
+                custom_id="builtin:issue",
                 required=True,
-                style=discord.TextStyle.short,
-                max_length=12,
+                style=discord.TextStyle.paragraph,
             )
         )
-        for f in fields_rows[:4]:  # Discord allows up to 5 inputs per modal (1 used by priority)
+        # Add up to 4 additional admin-defined fields (Discord limit is 5 total)
+        filtered = []
+        for f in fields_rows:
+            try:
+                if (f["label"] or "").strip().casefold() == default_issue_label.casefold():
+                    continue
+            except Exception:
+                pass
+            filtered.append(f)
+        for f in filtered[:4]:
             style = discord.TextStyle.short if (f["style"] or "short") == "short" else discord.TextStyle.paragraph
             ti = discord.ui.TextInput(
                 label=f["label"],
@@ -510,23 +519,8 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
 
         # Next ticket number (guild-wide counter)
         num = get_or_init_counter(guild.id)
-
-        # Determine priority from modal
-        priority = "Normal"
-        for item in self.children:
-            if isinstance(item, discord.ui.TextInput) and item.custom_id == "priority":
-                val = (item.value or "").strip().lower()
-                if val in ("low", "l"):
-                    priority = "Low"
-                elif val in ("normal", "n", "medium", "med"):
-                    priority = "Normal"
-                elif val in ("high", "h"):
-                    priority = "High"
-                elif val in ("urgent", "u", "critical", "crit"):
-                    priority = "Urgent"
-                else:
-                    priority = "Normal"
-                break
+        # Default priority is Low; can be changed after channel opens via button or admin command
+        priority = "Low"
 
         # Create channel (put number first to show global sequence clearly)
         channel_name = f"ticket-{num:04d}-{slugify_username(interaction.user.display_name)}"
@@ -592,14 +586,13 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
         embed.add_field(name="Priority", value=priority, inline=True)
         for item in self.children:
             if isinstance(item, discord.ui.TextInput):
-                field_id = int(item.custom_id.split(":")[1])
                 # store as content JSON entry as well
                 embed.add_field(name=item.label, value=item.value or "(blank)", inline=False)
 
         # Intro text
         intro = (
             "Thanks for reaching out! A staff member will respond as soon as possible.\n"
-            "If your issue is resolved, press 'Mark as Solved'. Staff will confirm closing."
+            "Use 'Set Priority' to change urgency, or 'Mark as Solved' if resolved. Staff will confirm closing."
         )
 
         view = TicketView()
