@@ -59,6 +59,7 @@ Commands:
   - `style`: `short` or `paragraph` (default `short`)
 - `/admin remove_field <category_name> <field_name>` — remove a modal field
 - `/admin list_config` — show current config and categories/fields
+  - For each field, shows its label plus `(name: <field_name>, id: <db_id>)` so you can use `<field_name>` with `/admin remove_field`.
 - `/admin post_panel` — post the panel with the dropdown
 - `/admin set_ticket_priority` — set current ticket priority (run inside the ticket)
 - `/admin reconcile_tickets [close_all] [delete_channels]` — close missing channels in DB or close all open tickets

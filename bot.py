@@ -956,7 +956,11 @@ async def list_config(interaction: discord.Interaction):
             fields = get_fields_for_category(int(c["id"]))
             lines.append(f"- {c['name']} ({len(fields)} fields)")
             for f in fields:
-                lines.append(f"  • {f['label']} [{'required' if f['required'] else 'optional'}] {f['style']}")
+                # Show label plus the field 'name' (used by remove_field) and DB id for clarity
+                req = 'required' if f['required'] else 'optional'
+                lines.append(
+                    f"  • {f['label']} (name: {f['name']}, id: {f['id']}) [{req}] {f['style']}"
+                )
     text = "\n".join(lines)
     await interaction.response.send_message(text, ephemeral=True)
 
