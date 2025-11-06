@@ -5,10 +5,11 @@ Ticketee is a minimal Discord ticket bot with:
 - Support panel message with category dropdown and modal fields
   - Always includes a big multi-line field: "What's the issue?"
 - Private ticket channels under a category with staff + opener access
-- "Mark as Solved" (user) and "Confirm Close" (staff) flow
+- "Mark as Solved" (user) and "Confirm Close" (staff) flow — channel deletes a few seconds after staff confirm
 - All ticket messages (and modal submissions) saved to SQLite
 - Dockerfile for Coolify deployment
- - Priority support (Low/Normal/High/Urgent) — defaults to Low; opener or staff can change via button; admin override command
+- Priority support (Low/Normal/High/Urgent) — defaults to Low; opener or staff can change via button; admin override command
+ - Queue number shows order of currently open tickets
 
 ## Requirements
 - Python 3.11+
@@ -63,10 +64,13 @@ Commands:
 - Modal: After picking a category, a modal appears with the fields you defined.
   - The modal always includes a large multi-line field "What's the issue?" (you don't need to add it).
   - You can add up to 4 additional fields per category (Discord limit of 5 inputs per modal).
-- Ticket: On submit, the bot creates a private channel: `ticket-<####>-<name>` (number first, global per server).
+- Ticket: On submit, the bot creates a private channel: `<name>-<n>` (e.g., `alice-1`).
+  - `n` is the count of open tickets at creation time (resets as tickets close).
   - Permissions: opener + staff role can view/send, everyone else denied.
   - First message includes the submitted details and buttons.
-- Priority: Starts at Low. Opener or staff can change later via the "Set Priority" button or `/admin set_ticket_priority`.
+- Priority: Starts at Low (⚪). Change later via the "Set Priority" button or `/admin set_ticket_priority`.
+  - Emojis: Low=⚪, Normal=🟡, High=🟠, Urgent=🔴 (also shown in channel topic)
+ - Closing: When staff press "Confirm Close", the bot announces closure and deletes the channel after a short delay.
 - Close Flow: Opener can press "Mark as Solved"; staff must press "Confirm Close" to close and lock the channel.
 - Logging: All messages in ticket channels are saved into SQLite (`messages` table), including the initial modal submission (stored as JSON content).
 

@@ -8,6 +8,7 @@ from typing import List, Optional, Dict, Any
 import discord
 from discord import app_commands
 from discord.ext import commands
+import asyncio
 
 
 DB_PATH = os.getenv("DB_PATH", os.path.join("data", "bot.sqlite"))
@@ -268,6 +269,36 @@ def is_admin_like(member: discord.Member, guild_cfg: Dict[str, Any]) -> bool:
     return False
 
 
+def priority_emoji(priority: str) -> str:
+    p = (priority or "").lower()
+    if p == "low":
+        return "⚪"
+    if p == "high":
+        return "🟠"
+    if p == "urgent":
+        return "🔴"
+    # Normal/default
+    return "🟡"
+
+
+def reserve_open_ticket_number(guild_id: int) -> int:
+    """Returns the next open-queue number (count of open tickets + 1) under a write lock.
+    This avoids duplicate numbers when multiple users create tickets at the same time.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute("SELECT COUNT(1) FROM tickets WHERE guild_id = ? AND status != 'closed'", (guild_id,))
+        row = cur.fetchone()
+        open_count = int(row[0]) if row else 0
+        num = open_count + 1
+        conn.commit()
+        return num
+    finally:
+        conn.close()
+
+
 class PanelSelect(discord.ui.Select):
     def __init__(self, options: List[discord.SelectOption]):
         super().__init__(
@@ -347,7 +378,7 @@ class PrioritySelect(discord.ui.Select):
         try:
             ch = interaction.channel
             if isinstance(ch, discord.TextChannel):
-                await ch.edit(topic=f"Ticket #{t['ticket_number']:04d} | Priority: {pr}")
+                await ch.edit(topic=f"Priority: {priority_emoji(pr)} {pr}")
             await ch.send(f"Priority set to {pr} by {interaction.user.mention}.")  # type: ignore
         except Exception:
             pass
@@ -439,9 +470,18 @@ class TicketView(discord.ui.View):
                 overwrites = ch.overwrites
                 if opener and isinstance(ch, discord.TextChannel):
                     overwrites[opener] = discord.PermissionOverwrite(view_channel=True, send_messages=False)
-                    await ch.edit(overwrites=overwrites, reason="Ticket closed")
+                    await ch.edit(overwrites=overwrites, topic=f"Priority: {priority_emoji(t['priority'])} {t['priority']} | Closed", reason="Ticket closed")
             await interaction.response.send_message("Ticket closed.", ephemeral=True)
-            await interaction.channel.send("This ticket is now closed. Thank you!")
+            await interaction.channel.send("This ticket is now closed. Deleting channel in a few seconds. Thank you!")
+            async def _delete_later(channel: discord.abc.GuildChannel):
+                try:
+                    await asyncio.sleep(3)
+                    await channel.delete(reason="Ticket closed")
+                except Exception:
+                    pass
+            # schedule deletion
+            if isinstance(ch, discord.TextChannel):
+                asyncio.create_task(_delete_later(ch))
         except Exception:
             await interaction.response.send_message("Ticket closed, but failed to update permissions.", ephemeral=True)
 
@@ -517,13 +557,13 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
         guild = interaction.guild
         cfg = get_config(guild.id)
 
-        # Next ticket number (guild-wide counter)
-        num = get_or_init_counter(guild.id)
+        # Queue number based on current open tickets (+1), under a short lock
+        num = reserve_open_ticket_number(guild.id)
         # Default priority is Low; can be changed after channel opens via button or admin command
         priority = "Low"
 
         # Create channel (put number first to show global sequence clearly)
-        channel_name = f"ticket-{num:04d}-{slugify_username(interaction.user.display_name)}"
+        channel_name = f"{slugify_username(interaction.user.display_name)}-{num}"
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
@@ -546,7 +586,7 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
             channel_name,
             category=parent,
             overwrites=overwrites,
-            topic=f"Ticket #{num:04d} | Priority: {priority}",
+            topic=f"Priority: {priority_emoji(priority)} {priority}",
             reason=f"New support ticket by {interaction.user}"
         )
 
@@ -570,20 +610,15 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
             ),
         )
         ticket_id = cur.lastrowid
-        # increment counter
-        cur.execute(
-            "UPDATE guild_counters SET next_ticket_number = next_ticket_number + 1 WHERE guild_id = ?",
-            (guild.id,),
-        )
         conn.commit()
 
         # Compose initial embed with fields
         embed = discord.Embed(
-            title=f"Ticket #{num:04d} - {self.category_row['name']}",
+            title=f"Ticket {slugify_username(interaction.user.display_name)}-{num} — {self.category_row['name']}",
             color=discord.Color.blurple(),
         )
         embed.add_field(name="Opener", value=interaction.user.mention, inline=False)
-        embed.add_field(name="Priority", value=priority, inline=True)
+        embed.add_field(name="Priority", value=f"{priority_emoji(priority)} {priority}", inline=True)
         for item in self.children:
             if isinstance(item, discord.ui.TextInput):
                 # store as content JSON entry as well
@@ -885,7 +920,7 @@ async def set_ticket_priority(interaction: discord.Interaction, priority: app_co
     # Update channel topic if possible
     try:
         if isinstance(interaction.channel, discord.TextChannel):
-            await interaction.channel.edit(topic=f"Ticket #{t['ticket_number']:04d} | Priority: {priority.value}")
+            await interaction.channel.edit(topic=f"Priority: {priority_emoji(priority.value)} {priority.value}")
     except Exception:
         pass
     await interaction.response.send_message(f"Priority set to {priority.value}.", ephemeral=True)
