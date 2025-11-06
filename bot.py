@@ -377,20 +377,26 @@ class PrioritySelect(discord.ui.Select):
         cur.execute("UPDATE tickets SET priority = ? WHERE id = ?", (pr, t["id"]))
         conn.commit()
         conn.close()
-        # Update topic and notify channel
+        # Update topic/name and notify channel; if ticket is marked solved, keep green indicator
         try:
             ch = interaction.channel
             if isinstance(ch, discord.TextChannel):
-                # Update topic
-                await ch.edit(topic=f"Priority: {priority_emoji(pr)} {pr}")
-                # Update channel name to include emoji prefix if possible
+                solved = (t["status"] in ("pending_close", "closed"))
                 base = ch.name
-                if base[:1] in ("⚪", "🟡", "🟠", "🔴") and base.startswith(base[:1] + "-"):
+                if base[:1] in ("⚪", "🟡", "🟠", "🔴", "🟢") and base.startswith(base[:1] + "-"):
                     base = base.split("-", 1)[1]
-                try:
-                    await ch.edit(name=f"{priority_emoji(pr)}-{base}")
-                except discord.HTTPException:
-                    pass
+                if solved:
+                    await ch.edit(topic="Status: 🟢 Solved (pending staff confirmation)" if t["status"] == "pending_close" else "Status: 🟢 Solved | Closed")
+                    try:
+                        await ch.edit(name=f"🟢-{base}")
+                    except discord.HTTPException:
+                        pass
+                else:
+                    await ch.edit(topic=f"Priority: {priority_emoji(pr)} {pr}")
+                    try:
+                        await ch.edit(name=f"{priority_emoji(pr)}-{base}")
+                    except discord.HTTPException:
+                        pass
                 # Update first embed's Priority field if we have it
                 try:
                     if t["first_message_id"]:
@@ -400,7 +406,8 @@ class PrioritySelect(discord.ui.Select):
                             new = discord.Embed(title=e.title, description=e.description, color=e.color)
                             for f in e.fields:
                                 if f.name == "Priority":
-                                    new.add_field(name="Priority", value=f"{priority_emoji(pr)} {pr}", inline=True)
+                                    val = "🟢 Solved (pending staff confirmation)" if solved and t["status"] == "pending_close" else ("🟢 Solved | Closed" if solved else f"{priority_emoji(pr)} {pr}")
+                                    new.add_field(name="Priority", value=val, inline=True)
                                 else:
                                     new.add_field(name=f.name, value=f.value, inline=f.inline)
                             await msg.edit(embed=new)
@@ -459,6 +466,30 @@ class TicketView(discord.ui.View):
         try:
             await interaction.channel.send(
                 f"{interaction.user.mention} marked this ticket as solved. A staff member can now confirm closing.")
+            # Turn the indicator green and update topic + first embed
+            ch = interaction.channel  # type: ignore
+            if isinstance(ch, discord.TextChannel):
+                base = ch.name
+                if base[:1] in ("⚪", "🟡", "🟠", "🔴", "🟢") and base.startswith(base[:1] + "-"):
+                    base = base.split("-", 1)[1]
+                try:
+                    await ch.edit(name=f"🟢-{base}", topic="Status: 🟢 Solved (pending staff confirmation)")
+                except discord.HTTPException:
+                    await ch.edit(topic="Status: 🟢 Solved (pending staff confirmation)")
+                try:
+                    if t.get("first_message_id"):
+                        msg = await ch.fetch_message(int(t["first_message_id"]))
+                        if msg.embeds:
+                            e = msg.embeds[0]
+                            new = discord.Embed(title=e.title, description=e.description, color=e.color)
+                            for f in e.fields:
+                                if f.name == "Priority":
+                                    new.add_field(name="Priority", value="🟢 Solved (pending staff confirmation)", inline=True)
+                                else:
+                                    new.add_field(name=f.name, value=f.value, inline=f.inline)
+                            await msg.edit(embed=new)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -497,7 +528,13 @@ class TicketView(discord.ui.View):
                 overwrites = ch.overwrites
                 if opener and isinstance(ch, discord.TextChannel):
                     overwrites[opener] = discord.PermissionOverwrite(view_channel=True, send_messages=False)
-                    await ch.edit(overwrites=overwrites, topic=f"Priority: {priority_emoji(t['priority'])} {t['priority']} | Closed", reason="Ticket closed")
+                    base = ch.name
+                    if base[:1] in ("⚪", "🟡", "🟠", "🔴", "🟢") and base.startswith(base[:1] + "-"):
+                        base = base.split("-", 1)[1]
+                    try:
+                        await ch.edit(overwrites=overwrites, name=f"🟢-{base}", topic="Status: 🟢 Solved | Closed", reason="Ticket closed")
+                    except discord.HTTPException:
+                        await ch.edit(overwrites=overwrites, topic="Status: 🟢 Solved | Closed", reason="Ticket closed")
             await interaction.response.send_message("Ticket closed.", ephemeral=True)
             await interaction.channel.send("This ticket is now closed. Deleting channel in a few seconds. Thank you!")
             async def _delete_later(channel: discord.abc.GuildChannel):
@@ -950,7 +987,7 @@ async def set_ticket_priority(interaction: discord.Interaction, priority: app_co
         return
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, ticket_number FROM tickets WHERE channel_id = ?", (interaction.channel.id,))
+    cur.execute("SELECT id, ticket_number, status, first_message_id FROM tickets WHERE channel_id = ?", (interaction.channel.id,))
     t = cur.fetchone()
     if not t:
         conn.close()
@@ -963,30 +1000,33 @@ async def set_ticket_priority(interaction: discord.Interaction, priority: app_co
     try:
         ch = interaction.channel
         if isinstance(ch, discord.TextChannel):
-            await ch.edit(topic=f"Priority: {priority_emoji(priority.value)} {priority.value}")
+            solved = (t["status"] in ("pending_close", "closed"))
             base = ch.name
-            if base[:1] in ("⚪", "🟡", "🟠", "🔴") and base.startswith(base[:1] + "-"):
+            if base[:1] in ("⚪", "🟡", "🟠", "🔴", "🟢") and base.startswith(base[:1] + "-"):
                 base = base.split("-", 1)[1]
-            try:
-                await ch.edit(name=f"{priority_emoji(priority.value)}-{base}")
-            except discord.HTTPException:
-                pass
+            if solved:
+                await ch.edit(topic="Status: 🟢 Solved (pending staff confirmation)" if t["status"] == "pending_close" else "Status: 🟢 Solved | Closed")
+                try:
+                    await ch.edit(name=f"🟢-{base}")
+                except discord.HTTPException:
+                    pass
+            else:
+                await ch.edit(topic=f"Priority: {priority_emoji(priority.value)} {priority.value}")
+                try:
+                    await ch.edit(name=f"{priority_emoji(priority.value)}-{base}")
+                except discord.HTTPException:
+                    pass
             # Update first embed's Priority field if available
             try:
-                # refetch the ticket row to get first_message_id if not in scope
-                conn2 = get_conn()
-                cur2 = conn2.cursor()
-                cur2.execute("SELECT first_message_id FROM tickets WHERE channel_id = ?", (ch.id,))
-                t2 = cur2.fetchone()
-                conn2.close()
-                if t2 and t2["first_message_id"]:
-                    msg = await ch.fetch_message(int(t2["first_message_id"]))
+                if t and t["first_message_id"]:
+                    msg = await ch.fetch_message(int(t["first_message_id"]))
                     if msg.embeds:
                         e = msg.embeds[0]
                         new = discord.Embed(title=e.title, description=e.description, color=e.color)
                         for f in e.fields:
                             if f.name == "Priority":
-                                new.add_field(name="Priority", value=f"{priority_emoji(priority.value)} {priority.value}", inline=True)
+                                val = "🟢 Solved (pending staff confirmation)" if solved and t["status"] == "pending_close" else ("🟢 Solved | Closed" if solved else f"{priority_emoji(priority.value)} {priority.value}")
+                                new.add_field(name="Priority", value=val, inline=True)
                             else:
                                 new.add_field(name=f.name, value=f.value, inline=f.inline)
                         await msg.edit(embed=new)
