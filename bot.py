@@ -104,6 +104,7 @@ def init_db():
             channel_id INTEGER,
             category_id INTEGER,
             status TEXT NOT NULL,
+            priority TEXT DEFAULT 'Normal',
             created_at INTEGER,
             closed_at INTEGER,
             admin_closer_id INTEGER
@@ -129,6 +130,15 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_ticket ON messages(ticket_id)")
 
     conn.commit()
+    # Lightweight migrations for newly added columns
+    try:
+        cur.execute("PRAGMA table_info(tickets)")
+        cols = {r[1] for r in cur.fetchall()}
+        if "priority" not in cols:
+            cur.execute("ALTER TABLE tickets ADD COLUMN priority TEXT DEFAULT 'Normal'")
+            conn.commit()
+    except Exception:
+        pass
     conn.close()
 
 
@@ -301,6 +311,55 @@ class PanelView(discord.ui.View):
         self.add_item(PanelSelect(options))
 
 
+class PrioritySelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Low", value="Low"),
+            discord.SelectOption(label="Normal", value="Normal", default=True),
+            discord.SelectOption(label="High", value="High"),
+            discord.SelectOption(label="Urgent", value="Urgent"),
+        ]
+        super().__init__(placeholder="Select priority", min_values=1, max_values=1, options=options, custom_id="priority_select")
+
+    async def callback(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            return
+        pr = self.values[0]
+        # Validate ticket and permissions
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM tickets WHERE channel_id = ?", (interaction.channel_id,))
+        t = cur.fetchone()
+        if not t:
+            conn.close()
+            await interaction.response.send_message("Not a ticket channel.", ephemeral=True)
+            return
+        cfg = get_config(interaction.guild.id)
+        allow = (int(t["opener_id"]) == interaction.user.id) or is_admin_like(interaction.user, cfg)  # type: ignore
+        if not allow:
+            conn.close()
+            await interaction.response.send_message("Only opener or staff can set priority.", ephemeral=True)
+            return
+        cur.execute("UPDATE tickets SET priority = ? WHERE id = ?", (pr, t["id"]))
+        conn.commit()
+        conn.close()
+        # Update topic and notify channel
+        try:
+            ch = interaction.channel
+            if isinstance(ch, discord.TextChannel):
+                await ch.edit(topic=f"Ticket #{t['ticket_number']:04d} | Priority: {pr}")
+            await ch.send(f"Priority set to {pr} by {interaction.user.mention}.")  # type: ignore
+        except Exception:
+            pass
+        await interaction.response.edit_message(content=f"Priority updated to {pr}.", view=None)
+
+
+class PrioritySelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+        self.add_item(PrioritySelect())
+
+
 class TicketView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -386,6 +445,28 @@ class TicketView(discord.ui.View):
         except Exception:
             await interaction.response.send_message("Ticket closed, but failed to update permissions.", ephemeral=True)
 
+    @discord.ui.button(label="Set Priority", style=discord.ButtonStyle.secondary, custom_id="ticket_set_priority")
+    async def set_priority(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            return
+        # Only opener or staff/admin can change
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM tickets WHERE channel_id = ?", (interaction.channel_id,))
+        t = cur.fetchone()
+        conn.close()
+        if not t:
+            await interaction.response.send_message("Not a ticket channel.", ephemeral=True)
+            return
+        cfg = get_config(interaction.guild.id)
+        is_staff = is_admin_like(interaction.user, cfg)
+        if not is_staff and int(t["opener_id"]) != interaction.user.id:
+            await interaction.response.send_message("Only the opener or staff can change priority.", ephemeral=True)
+            return
+
+        # Show ephemeral select to choose priority
+        await interaction.response.send_message("Choose a priority:", view=PrioritySelectView(), ephemeral=True)
+
 
 class TicketModal(discord.ui.Modal, title="Support Ticket"):
     def __init__(self, category_row: sqlite3.Row, fields_rows: List[sqlite3.Row]):
@@ -393,7 +474,17 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
         self.fields_rows = fields_rows
         # Build inputs
         components = []
-        for f in fields_rows[:5]:  # Discord allows up to 5 inputs per modal
+        # Always include priority input first
+        components.append(
+            discord.ui.TextInput(
+                label="Priority (Low/Normal/High/Urgent)",
+                custom_id="priority",
+                required=True,
+                style=discord.TextStyle.short,
+                max_length=12,
+            )
+        )
+        for f in fields_rows[:4]:  # Discord allows up to 5 inputs per modal (1 used by priority)
             style = discord.TextStyle.short if (f["style"] or "short") == "short" else discord.TextStyle.paragraph
             ti = discord.ui.TextInput(
                 label=f["label"],
@@ -417,11 +508,28 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
         guild = interaction.guild
         cfg = get_config(guild.id)
 
-        # Next ticket number
+        # Next ticket number (guild-wide counter)
         num = get_or_init_counter(guild.id)
 
-        # Create channel
-        channel_name = f"ticket-{slugify_username(interaction.user.display_name)}-{num:04d}"
+        # Determine priority from modal
+        priority = "Normal"
+        for item in self.children:
+            if isinstance(item, discord.ui.TextInput) and item.custom_id == "priority":
+                val = (item.value or "").strip().lower()
+                if val in ("low", "l"):
+                    priority = "Low"
+                elif val in ("normal", "n", "medium", "med"):
+                    priority = "Normal"
+                elif val in ("high", "h"):
+                    priority = "High"
+                elif val in ("urgent", "u", "critical", "crit"):
+                    priority = "Urgent"
+                else:
+                    priority = "Normal"
+                break
+
+        # Create channel (put number first to show global sequence clearly)
+        channel_name = f"ticket-{num:04d}-{slugify_username(interaction.user.display_name)}"
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
@@ -430,6 +538,9 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
         staff_role = guild.get_role(int(staff_role_id)) if staff_role_id else None
         if staff_role:
             overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+        # Ensure the bot can see and send in the channel
+        me = guild.me or await guild.fetch_member(bot.user.id)  # type: ignore
+        overwrites[me] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 
         parent = None
         if cfg.get("ticket_category_id"):
@@ -441,6 +552,7 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
             channel_name,
             category=parent,
             overwrites=overwrites,
+            topic=f"Ticket #{num:04d} | Priority: {priority}",
             reason=f"New support ticket by {interaction.user}"
         )
 
@@ -449,8 +561,8 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO tickets(ticket_number, guild_id, opener_id, channel_id, category_id, status, created_at)
-            VALUES(?,?,?,?,?,?,?)
+            INSERT INTO tickets(ticket_number, guild_id, opener_id, channel_id, category_id, status, created_at, priority)
+            VALUES(?,?,?,?,?,?,?,?)
             """,
             (
                 num,
@@ -460,6 +572,7 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
                 self.category_row["id"],
                 "open",
                 int(time.time()),
+                priority,
             ),
         )
         ticket_id = cur.lastrowid
@@ -476,6 +589,7 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
             color=discord.Color.blurple(),
         )
         embed.add_field(name="Opener", value=interaction.user.mention, inline=False)
+        embed.add_field(name="Priority", value=priority, inline=True)
         for item in self.children:
             if isinstance(item, discord.ui.TextInput):
                 field_id = int(item.custom_id.split(":")[1])
@@ -484,8 +598,8 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
 
         # Intro text
         intro = (
-            "Thanks for reaching out! A staff member will respond here shortly.\n"
-            "If your issue is resolved, you can press 'Mark as Solved'. A staff member will confirm closing."
+            "Thanks for reaching out! A staff member will respond as soon as possible.\n"
+            "If your issue is resolved, press 'Mark as Solved'. Staff will confirm closing."
         )
 
         view = TicketView()
@@ -695,6 +809,24 @@ async def post_panel(interaction: discord.Interaction):
     if not isinstance(ch, discord.TextChannel):
         await interaction.response.send_message("Configured support channel is invalid.", ephemeral=True)
         return
+    # Permission pre-check to avoid failure
+    me = interaction.guild.me or await interaction.guild.fetch_member(bot.user.id)  # type: ignore
+    perms = ch.permissions_for(me)
+    missing = []
+    if not perms.view_channel:
+        missing.append("View Channel")
+    if not perms.send_messages:
+        missing.append("Send Messages")
+    if not perms.read_message_history:
+        missing.append("Read Message History")
+    if not perms.embed_links:
+        missing.append("Embed Links")
+    if missing:
+        await interaction.response.send_message(
+            f"Missing channel permissions in {ch.mention}: {', '.join(missing)}",
+            ephemeral=True,
+        )
+        return
     cats = list_categories(interaction.guild_id)
     if not cats:
         await interaction.response.send_message("Please add at least one category first.", ephemeral=True)
@@ -719,8 +851,51 @@ async def post_panel(interaction: discord.Interaction):
         )
 
     view = PanelView(options)
-    await ch.send(embed=embed, view=view)
-    await interaction.response.send_message("Panel posted.", ephemeral=True)
+    try:
+        await ch.send(embed=embed, view=view)
+        await interaction.response.send_message("Panel posted.", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            f"I don't have permission to post in {ch.mention}. Check channel/category overrides.",
+            ephemeral=True,
+        )
+    except discord.HTTPException as e:
+        await interaction.response.send_message(
+            f"Failed to post panel: {e}",
+            ephemeral=True,
+        )
+
+
+@admin_group.command(name="set_ticket_priority", description="Set the ticket priority for the current ticket channel")
+@require_admin()
+@app_commands.choices(priority=[
+    app_commands.Choice(name="Low", value="Low"),
+    app_commands.Choice(name="Normal", value="Normal"),
+    app_commands.Choice(name="High", value="High"),
+    app_commands.Choice(name="Urgent", value="Urgent"),
+])
+async def set_ticket_priority(interaction: discord.Interaction, priority: app_commands.Choice[str]):
+    if not interaction.channel or not interaction.guild:
+        await interaction.response.send_message("Use this in a ticket channel.", ephemeral=True)
+        return
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id, ticket_number FROM tickets WHERE channel_id = ?", (interaction.channel.id,))
+    t = cur.fetchone()
+    if not t:
+        conn.close()
+        await interaction.response.send_message("This is not a ticket channel.", ephemeral=True)
+        return
+    cur.execute("UPDATE tickets SET priority = ? WHERE id = ?", (priority.value, t["id"]))
+    conn.commit()
+    conn.close()
+    # Update channel topic if possible
+    try:
+        if isinstance(interaction.channel, discord.TextChannel):
+            await interaction.channel.edit(topic=f"Ticket #{t['ticket_number']:04d} | Priority: {priority.value}")
+    except Exception:
+        pass
+    await interaction.response.send_message(f"Priority set to {priority.value}.", ephemeral=True)
 
 
 @bot.event
