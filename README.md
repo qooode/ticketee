@@ -49,7 +49,8 @@ Commands:
 - `/admin set_support_channel <#channel>` — where the panel is posted
 - `/admin set_ticket_category <category>` — parent category for ticket channels
 - `/admin set_staff_role <@role>` — staff that can view and confirm close
-- `/admin remove_staff_role` — unset the staff role (falls back to owner/Manage Server)
+- `/admin remove_staff_role [apply_to_open]` — unset the staff role and revoke it from open tickets (default true)
+  (Only one managing role is supported: set or remove the staff role.)
 - `/admin set_panel <title> <description> <contact_name>` — panel copy
 - `/admin add_category <name> [placeholder]` — adds a ticket category
 - `/admin remove_category <name>` — removes a ticket category
@@ -59,6 +60,7 @@ Commands:
 - `/admin list_config` — show current config and categories/fields
 - `/admin post_panel` — post the panel with the dropdown
 - `/admin set_ticket_priority` — set current ticket priority (run inside the ticket)
+- `/admin reconcile_tickets [close_all] [delete_channels]` — close missing channels in DB or close all open tickets
 
 ## How It Works
 - Panel: The bot posts an embed with a dropdown of categories you configured.

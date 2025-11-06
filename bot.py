@@ -131,6 +131,9 @@ def init_db():
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_ticket ON messages(ticket_id)")
 
+    # roles allowed to access tickets (in addition to staff_role)
+    # access_roles table removed in favor of a single staff role model
+
     conn.commit()
     # Lightweight migrations for newly added columns
     try:
@@ -780,11 +783,36 @@ async def set_staff_role(interaction: discord.Interaction, role: discord.Role):
     await interaction.response.send_message(f"Staff role set to {role.mention}", ephemeral=True)
 
 
-@admin_group.command(name="remove_staff_role", description="Remove/unset the configured staff role")
+@admin_group.command(name="remove_staff_role", description="Unset the staff role and optionally revoke it from open tickets")
 @require_admin()
-async def remove_staff_role(interaction: discord.Interaction):
+async def remove_staff_role(interaction: discord.Interaction, apply_to_open: bool = True):
+    cfg = get_config(interaction.guild_id)
+    old_role_id = cfg.get("staff_role_id")
     upsert_config(interaction.guild_id, staff_role_id=None)
-    await interaction.response.send_message("Staff role has been unset. Only server owner or Manage Server can confirm close.", ephemeral=True)
+    updated = 0
+    if apply_to_open and old_role_id and interaction.guild:
+        role = interaction.guild.get_role(int(old_role_id))
+        if role:
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute("SELECT channel_id FROM tickets WHERE guild_id = ? AND status != 'closed'", (interaction.guild.id,))
+            chans = [int(r[0]) for r in cur.fetchall()]
+            conn.close()
+            for cid in chans:
+                ch = interaction.guild.get_channel(cid)
+                if isinstance(ch, discord.TextChannel):
+                    overwrites = ch.overwrites
+                    if role in overwrites:
+                        try:
+                            del overwrites[role]
+                            await ch.edit(overwrites=overwrites, reason="Unset staff role; revoke access")
+                            updated += 1
+                        except Exception:
+                            pass
+    await interaction.response.send_message(
+        f"Staff role unset. Updated {updated} open tickets." if apply_to_open else "Staff role unset.",
+        ephemeral=True,
+    )
 
 
 @admin_group.command(name="set_panel", description="Set panel title/description/contact name")
@@ -1044,66 +1072,7 @@ async def set_ticket_priority(interaction: discord.Interaction, priority: app_co
     await interaction.response.send_message(f"Priority set to {priority.value}.", ephemeral=True)
 
 
-@admin_group.command(name="add_ticket_role", description="Grant a role access to this ticket")
-@require_admin()
-async def add_ticket_role(interaction: discord.Interaction, role: discord.Role):
-    if not interaction.channel or not interaction.guild:
-        await interaction.response.send_message("Use this in a ticket channel.", ephemeral=True)
-        return
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT id FROM tickets WHERE channel_id = ?", (interaction.channel.id,))
-    t = cur.fetchone()
-    conn.close()
-    if not t:
-        await interaction.response.send_message("This is not a ticket channel.", ephemeral=True)
-        return
-    ch = interaction.channel
-    if isinstance(ch, discord.TextChannel):
-        overwrites = ch.overwrites
-        overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-        try:
-            await ch.edit(overwrites=overwrites, reason="Grant role access to ticket")
-            await interaction.response.send_message(f"Granted {role.mention} access to this ticket.", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"Failed to grant role: {e}", ephemeral=True)
-    else:
-        await interaction.response.send_message("Unsupported channel type.", ephemeral=True)
-
-
-@admin_group.command(name="remove_ticket_role", description="Remove a role's access from this ticket")
-@require_admin()
-async def remove_ticket_role(interaction: discord.Interaction, role: discord.Role):
-    if not interaction.channel or not interaction.guild:
-        await interaction.response.send_message("Use this in a ticket channel.", ephemeral=True)
-        return
-    cfg = get_config(interaction.guild.id)
-    staff_role_id = cfg.get("staff_role_id")
-    if staff_role_id and int(staff_role_id) == role.id:
-        await interaction.response.send_message("Refusing to remove the configured staff role here. Use /admin set_staff_role to change it.", ephemeral=True)
-        return
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT id FROM tickets WHERE channel_id = ?", (interaction.channel.id,))
-    t = cur.fetchone()
-    conn.close()
-    if not t:
-        await interaction.response.send_message("This is not a ticket channel.", ephemeral=True)
-        return
-    ch = interaction.channel
-    if isinstance(ch, discord.TextChannel):
-        overwrites = ch.overwrites
-        if role in overwrites:
-            try:
-                del overwrites[role]
-                await ch.edit(overwrites=overwrites, reason="Revoke role access from ticket")
-                await interaction.response.send_message(f"Removed {role.mention} from this ticket.", ephemeral=True)
-            except Exception as e:
-                await interaction.response.send_message(f"Failed to remove role: {e}", ephemeral=True)
-        else:
-            await interaction.response.send_message("No explicit permission override found for that role.", ephemeral=True)
-    else:
-        await interaction.response.send_message("Unsupported channel type.", ephemeral=True)
+# Removed access role commands to keep only staff role add/remove as requested
 
 
 @admin_group.command(name="reconcile_tickets", description="Close missing ticket channels; optional close all")
