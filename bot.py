@@ -193,6 +193,10 @@ def get_config(guild_id: int) -> Dict[str, Any]:
         cfg["panel_description"] = ENV_PANEL_DESCRIPTION
     return cfg
 
+# Simple server-side cooldown for priority changes (per ticket channel)
+PRIORITY_CHANGE_COOLDOWN_SECONDS = 600
+last_priority_change_at: Dict[int, float] = {}
+
 
 def list_categories(guild_id: int) -> List[sqlite3.Row]:
     conn = get_conn()
@@ -402,6 +406,21 @@ class PrioritySelect(discord.ui.Select):
             conn.close()
             await interaction.response.send_message("Only opener or staff can set priority.", ephemeral=True)
             return
+        # No-op if priority unchanged
+        if (t["priority"] or "").casefold() == pr.casefold():
+            await interaction.response.edit_message(content=f"Priority already {pr}.", view=None)
+            conn.close()
+            return
+        # Server-side cooldown per channel
+        cid = int(interaction.channel_id) if interaction.channel_id else None  # type: ignore
+        if cid is not None:
+            now_ts = time.time()
+            last = last_priority_change_at.get(cid, 0)
+            remain = int(PRIORITY_CHANGE_COOLDOWN_SECONDS - (now_ts - last))
+            if remain > 0:
+                await interaction.response.edit_message(content=f"Please wait {remain}s before changing priority again.", view=None)
+                conn.close()
+                return
         cur.execute("UPDATE tickets SET priority = ? WHERE id = ?", (pr, t["id"]))
         conn.commit()
         conn.close()
@@ -444,6 +463,9 @@ class PrioritySelect(discord.ui.Select):
             await ch.send(f"Priority set to {pr} by {interaction.user.mention}.")  # type: ignore
         except Exception:
             pass
+        # Record last change time for cooldown
+        if cid is not None:
+            last_priority_change_at[cid] = time.time()
         await interaction.response.edit_message(content=f"Priority updated to {pr}.", view=None)
 
 
@@ -606,6 +628,8 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
         self.fields_rows = fields_rows
         # Build inputs
         components = []
+        # Keep a map of input custom_id -> label to avoid using deprecated attribute access
+        self._labels: Dict[str, str] = {}
         # Always include a larger multi-line field for the main issue
         default_issue_label = "What's the issue?"
         components.append(
@@ -616,6 +640,7 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
                 style=discord.TextStyle.paragraph,
             )
         )
+        self._labels["builtin:issue"] = default_issue_label
         # Add up to 4 additional admin-defined fields (Discord limit is 5 total)
         filtered = []
         for f in fields_rows:
@@ -627,15 +652,20 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
             filtered.append(f)
         for f in filtered[:4]:
             style = discord.TextStyle.short if (f["style"] or "short") == "short" else discord.TextStyle.paragraph
+            key = f"field:{f['id']}"
             ti = discord.ui.TextInput(
                 label=f["label"],
-                custom_id=f"field:{f['id']}",
+                custom_id=key,
                 required=bool(f["required"]),
                 style=style,
                 min_length=f["min_length"] if f["min_length"] else None,
                 max_length=f["max_length"] if f["max_length"] else None,
             )
             components.append(ti)
+            try:
+                self._labels[key] = f["label"]
+            except Exception:
+                pass
 
         super().__init__(timeout=None)
         for c in components:
@@ -725,7 +755,8 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
         for item in self.children:
             if isinstance(item, discord.ui.TextInput):
                 # store as content JSON entry as well
-                embed.add_field(name=item.label, value=item.value or "(blank)", inline=False)
+                label = self._labels.get(item.custom_id, str(item.custom_id))  # type: ignore
+                embed.add_field(name=label, value=item.value or "(blank)", inline=False)
 
         # Intro text
         intro = (
@@ -745,7 +776,8 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
         content_dict = {}
         for item in self.children:
             if isinstance(item, discord.ui.TextInput):
-                content_dict[item.label] = item.value
+                label = self._labels.get(item.custom_id, str(item.custom_id))  # type: ignore
+                content_dict[label] = item.value
         cur.execute(
             "INSERT INTO messages(ticket_id, discord_message_id, author_id, content, attachments_json, created_at) VALUES (?,?,?,?,?,?)",
             (ticket_id, None, interaction.user.id, json.dumps(content_dict), json.dumps([]), int(time.time())),
@@ -1075,6 +1107,21 @@ async def set_ticket_priority(interaction: discord.Interaction, priority: app_co
         conn.close()
         await interaction.response.send_message("This is not a ticket channel.", ephemeral=True)
         return
+    # No-op if unchanged
+    if (t["priority"] or "").casefold() == priority.value.casefold():
+        await interaction.response.send_message(f"Priority already {priority.value}.", ephemeral=True)
+        conn.close()
+        return
+    # Server-side cooldown per channel
+    cid = int(interaction.channel.id) if interaction.channel else None  # type: ignore
+    if cid is not None:
+        now_ts = time.time()
+        last = last_priority_change_at.get(cid, 0)
+        remain = int(PRIORITY_CHANGE_COOLDOWN_SECONDS - (now_ts - last))
+        if remain > 0:
+            await interaction.response.send_message(f"Please wait {remain}s before changing priority again.", ephemeral=True)
+            conn.close()
+            return
     cur.execute("UPDATE tickets SET priority = ? WHERE id = ?", (priority.value, t["id"]))
     conn.commit()
     conn.close()
@@ -1116,6 +1163,9 @@ async def set_ticket_priority(interaction: discord.Interaction, priority: app_co
                 pass
     except Exception:
         pass
+    # Record last change time for cooldown
+    if cid is not None:
+        last_priority_change_at[cid] = time.time()
     await interaction.response.send_message(f"Priority set to {priority.value}.", ephemeral=True)
 
 
