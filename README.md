@@ -8,7 +8,7 @@ Ticketee is a minimal Discord ticket bot with:
 - "Mark as Solved" (user) and "Confirm Close" (staff) flow — channel deletes a few seconds after staff confirm
 - All ticket messages (and modal submissions) saved to SQLite
 - Dockerfile for Coolify deployment
-- Priority support (Low/Normal/High/Urgent) — defaults to Low; opener or staff can change via button; admin override command
+- Priority support (Low/Normal/High/Urgent) — defaults to Low; staff or admins can change via button; admin slash command available
  - Queue number shows order of currently open tickets
 
 ## Requirements
@@ -73,7 +73,7 @@ Commands:
   - `n` is the count of open tickets at creation time (resets as tickets close).
   - Permissions: opener + staff role can view/send, everyone else denied.
   - First message includes the submitted details and buttons.
-- Priority: Starts at Low (⚪). Change later via the "Set Priority" button or `/admin set_ticket_priority`.
+- Priority: Starts at Low (⚪). Staff or admins can change via the "Set Priority" button, or use `/admin set_ticket_priority`.
   - Emojis: Low=⚪, Normal=🟡, High=🟠, Urgent=🔴 (also shown in channel topic)
  - Closing: When staff press "Confirm Close", the bot announces closure and deletes the channel after a short delay.
 - Close Flow: Opener can press "Mark as Solved"; staff must press "Confirm Close" to close and lock the channel.

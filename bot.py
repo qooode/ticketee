@@ -348,10 +348,18 @@ def slugify_username(name: str) -> str:
 
 
 def is_admin(member: discord.Member) -> bool:
-    if member.guild.owner_id == member.id:
-        return True
-    if member.guild_permissions.manage_guild:
-        return True
+    # Treat guild owner or members with Administrator/Manage Guild as admins
+    try:
+        if member.guild.owner_id == member.id:
+            return True
+        perms = member.guild_permissions
+        # Explicitly check administrator in case manage_guild isn't set
+        if getattr(perms, "administrator", False):
+            return True
+        if getattr(perms, "manage_guild", False):
+            return True
+    except Exception:
+        pass
     return False
 
 
@@ -482,10 +490,10 @@ class PrioritySelect(discord.ui.Select):
             await interaction.response.send_message("Not a ticket channel.", ephemeral=True)
             return
         cfg = get_config(interaction.guild.id)
-        allow = (int(t["opener_id"]) == interaction.user.id) or is_admin(interaction.user) or is_staff(interaction.user, cfg)  # type: ignore
+        allow = is_admin(interaction.user) or is_staff(interaction.user, cfg)  # type: ignore
         if not allow:
             conn.close()
-            await interaction.response.send_message("Only opener or staff can set priority.", ephemeral=True)
+            await interaction.response.send_message("Only staff or admins can set priority.", ephemeral=True)
             return
         # Acknowledge quickly to avoid token expiry
         try:
@@ -588,7 +596,7 @@ class TicketView(discord.ui.View):
             return
         if int(t["opener_id"]) != interaction.user.id:
             conn.close()
-            await interaction.response.send_message("Only the ticket opener can mark as solved.", ephemeral=True)
+            await interaction.response.send_message("Only the ticket opener can mark as solved. Staff/admin can use 'Confirm Close'.", ephemeral=True)
             return
         if t["status"] == "closed":
             conn.close()
@@ -728,7 +736,7 @@ class TicketView(discord.ui.View):
     async def set_priority(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             return
-        # Only opener or staff/admin can change
+        # Only staff/admin can change
         conn = get_conn()
         cur = conn.cursor()
         cur.execute("SELECT * FROM tickets WHERE channel_id = ?", (interaction.channel_id,))
@@ -739,8 +747,8 @@ class TicketView(discord.ui.View):
             return
         cfg = get_config(interaction.guild.id)
         staff_ok = is_staff(interaction.user, cfg) or is_admin(interaction.user)
-        if not staff_ok and int(t["opener_id"]) != interaction.user.id:
-            await interaction.response.send_message("Only the opener or staff can change priority.", ephemeral=True)
+        if not staff_ok:
+            await interaction.response.send_message("Only staff or admins can change priority.", ephemeral=True)
             return
 
         # Show ephemeral select to choose priority
@@ -967,16 +975,21 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
                 label = self._labels.get(item.custom_id, str(item.custom_id))  # type: ignore
                 embed.add_field(name=label, value=item.value or "(blank)", inline=False)
 
-        # Intro text
+        # Intro text (mention opener so they get a ping in the channel)
         intro = (
-            "Thanks for reaching out! A staff member will respond as soon as possible.\n"
+            f"{interaction.user.mention} Thanks for reaching out! A staff member will respond as soon as possible.\n"
             "Use 'Set Priority' to change urgency, or 'Mark as Solved' if resolved. Staff will confirm closing."
         )
 
         view = TicketView()
         first_msg_id: Optional[int] = None
         try:
-            msg = await channel.send(content=intro, embed=embed, view=view)
+            msg = await channel.send(
+                content=intro,
+                embed=embed,
+                view=view,
+                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+            )
             first_msg_id = msg.id
         except Exception:
             first_msg_id = None
