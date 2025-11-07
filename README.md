@@ -10,7 +10,6 @@ Ticketee is a minimal Discord ticket bot with:
 - Dockerfile for Coolify deployment
 - Priority support (Low/Normal/High/Urgent) — defaults to Low; opener or staff can change via button; admin override command
  - Queue number shows order of currently open tickets
- - Optional localhost-only web dashboard for config and read-only browsing
 
 ## Requirements
 - Python 3.11+
@@ -34,19 +33,6 @@ Set these environment variables (Coolify or local):
   - `python -m venv .venv && source .venv/bin/activate`
   - `pip install -r requirements.txt`
 - Run: `python bot.py`
-
-### Optional: Admin Dashboard (web)
-- Set environment variables:
-  - `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` (required for login)
-  - `DASHBOARD_SECRET_KEY` (optional; random if omitted)
-  - `DASHBOARD_BIND_HOST` (default: `127.0.0.1`) and `DASHBOARD_BIND_PORT` (default: `8080`)
-- Start: `python dashboard.py`
-- Features:
-  - Per‑guild config editing (channel/role IDs, panel copy)
-  - Manage categories and fields
-  - Browse recent tickets and view messages
-  - Export single ticket transcript as JSON
-- Security: binds to localhost by default. If exposing remotely, place behind a reverse proxy with TLS, set strong credentials, and consider IP allow‑listing.
 
 ## Deploy with Docker/Coolify
 - Image builds from `Dockerfile`.
@@ -92,7 +78,6 @@ Commands:
  - Closing: When staff press "Confirm Close", the bot announces closure and deletes the channel after a short delay.
 - Close Flow: Opener can press "Mark as Solved"; staff must press "Confirm Close" to close and lock the channel.
 - Logging: All messages in ticket channels are saved into SQLite (`messages` table), including the initial modal submission (stored as JSON content).
- - Dashboard: Reads/writes directly to the same SQLite DB; it does not call Discord APIs.
 
 ## Notes
 - Max 25 categories appear in the dropdown (Discord API limit).
