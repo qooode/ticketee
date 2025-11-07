@@ -11,6 +11,18 @@ from discord import app_commands
 from discord.ext import commands
 import asyncio
 
+# Global/per-guild helpers for rate-limit aware operations
+_CREATE_LOCKS: Dict[int, asyncio.Lock] = {}
+_GLOBAL_CREATE_RL_UNTIL: float = 0.0  # epoch seconds until which we avoid create calls
+
+
+def _get_create_lock(guild_id: int) -> asyncio.Lock:
+    lock = _CREATE_LOCKS.get(guild_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _CREATE_LOCKS[guild_id] = lock
+    return lock
+
 
 DB_PATH = os.getenv("DB_PATH", os.path.join("data", "bot.sqlite"))
 TOKEN = os.getenv("DISCORD_TOKEN", "")
@@ -59,10 +71,52 @@ async def try_edit_channel(
             kwargs["reason"] = reason
         await asyncio.wait_for(ch.edit(**kwargs), timeout=timeout)
         return True
-    except (asyncio.TimeoutError, discord.HTTPException):
+    except (asyncio.TimeoutError, discord.HTTPException, discord.errors.RateLimited):
         return False
     except Exception:
         return False
+
+
+async def safe_create_text_channel(
+    guild: discord.Guild,
+    name: str,
+    *,
+    category: Optional[discord.CategoryChannel] = None,
+    overwrites: Optional[Dict[Any, Any]] = None,
+    topic: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> discord.TextChannel:
+    """Create a text channel while handling rate limits robustly.
+
+    - Serialises creation per-guild via a lock to avoid burst hitting the same bucket.
+    - Fast-fails if we know we're currently under a long global create-channel cooldown.
+    - Propagates discord.errors.RateLimited so callers can inform the user.
+    """
+    global _GLOBAL_CREATE_RL_UNTIL
+
+    # If we already know we're rate limited for a long time, fail fast.
+    now = time.time()
+    if _GLOBAL_CREATE_RL_UNTIL and now < _GLOBAL_CREATE_RL_UNTIL:
+        # Mimic the library exception contract for unified handling upstream
+        retry_after = _GLOBAL_CREATE_RL_UNTIL - now
+        raise discord.errors.RateLimited(retry_after)  # type: ignore[arg-type]
+
+    async with _get_create_lock(guild.id):
+        try:
+            return await guild.create_text_channel(
+                name,
+                category=category,
+                overwrites=overwrites,
+                topic=topic,
+                reason=reason,
+            )
+        except discord.errors.RateLimited as e:
+            # Record a global cooldown window so subsequent attempts fail fast
+            try:
+                _GLOBAL_CREATE_RL_UNTIL = max(_GLOBAL_CREATE_RL_UNTIL, time.time() + float(getattr(e, "retry_after", 0) or 0))
+            except Exception:
+                pass
+            raise
 
 
 def init_db():
@@ -745,8 +799,17 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
             self.add_item(c)
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Acknowledge promptly to avoid token expiry and to allow followups
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
-            await interaction.response.send_message("This can only be used in a server.", ephemeral=True)
+            try:
+                await interaction.followup.send("This can only be used in a server.", ephemeral=True)
+            except Exception:
+                pass
             return
 
         guild = interaction.guild
@@ -779,22 +842,42 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
                 parent = None
 
         try:
-            channel = await guild.create_text_channel(
-                name_with_emoji,
-                category=parent,
-                overwrites=overwrites,
-                topic=f"Priority: {priority_emoji(priority)} {priority}",
-                reason=f"New support ticket by {interaction.user}"
-            )
-        except discord.HTTPException:
-            # Fallback if emoji not allowed in channel names
-            channel = await guild.create_text_channel(
-                base_name,
-                category=parent,
-                overwrites=overwrites,
-                topic=f"Priority: {priority_emoji(priority)} {priority}",
-                reason=f"New support ticket by {interaction.user}"
-            )
+            try:
+                channel = await safe_create_text_channel(
+                    guild,
+                    name_with_emoji,
+                    category=parent,
+                    overwrites=overwrites,
+                    topic=f"Priority: {priority_emoji(priority)} {priority}",
+                    reason=f"New support ticket by {interaction.user}",
+                )
+            except discord.HTTPException:
+                # Fallback if emoji not allowed in channel names
+                channel = await safe_create_text_channel(
+                    guild,
+                    base_name,
+                    category=parent,
+                    overwrites=overwrites,
+                    topic=f"Priority: {priority_emoji(priority)} {priority}",
+                    reason=f"New support ticket by {interaction.user}",
+                )
+        except discord.errors.RateLimited as e:
+            # Inform the user and bail out cleanly without crashing the modal
+            retry_after = float(getattr(e, "retry_after", 0) or 0)
+            msg = "Discord is rate limiting channel creation. Please try again later."
+            if retry_after > 0:
+                # Provide a friendlier ETA when possible
+                mins = int(retry_after // 60)
+                hrs = mins // 60
+                if hrs >= 1:
+                    msg += f" Estimated wait: ~{hrs}h {mins % 60}m."
+                else:
+                    msg += f" Estimated wait: ~{mins}m."
+            try:
+                await interaction.followup.send(msg, ephemeral=True)
+            except Exception:
+                pass
+            return
 
         # Persist ticket row
         conn = get_conn()
@@ -860,9 +943,12 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
         conn.commit()
         conn.close()
 
-        await interaction.response.send_message(
-            f"Ticket created: {channel.mention}", ephemeral=True
-        )
+        try:
+            await interaction.followup.send(
+                f"Ticket created: {channel.mention}", ephemeral=True
+            )
+        except Exception:
+            pass
 
 
 intents = discord.Intents.default()
