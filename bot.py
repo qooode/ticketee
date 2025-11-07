@@ -594,9 +594,11 @@ class TicketView(discord.ui.View):
             conn.close()
             await interaction.response.send_message("Not a ticket channel.", ephemeral=True)
             return
-        if int(t["opener_id"]) != interaction.user.id:
+        cfg = get_config(interaction.guild.id)
+        is_allowed = (int(t["opener_id"]) == interaction.user.id) or is_admin(interaction.user) or is_staff(interaction.user, cfg)
+        if not is_allowed:
             conn.close()
-            await interaction.response.send_message("Only the ticket opener can mark as solved. Staff/admin can use 'Confirm Close'.", ephemeral=True)
+            await interaction.response.send_message("Only the ticket opener or staff/admin can mark as solved.", ephemeral=True)
             return
         if t["status"] == "closed":
             conn.close()
