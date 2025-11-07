@@ -32,6 +32,20 @@ ENV_CONTACT_NAME = os.getenv("SUPPORT_CONTACT_NAME")
 ENV_PANEL_TITLE = os.getenv("PANEL_TITLE")
 ENV_PANEL_DESCRIPTION = os.getenv("PANEL_DESCRIPTION")
 
+# App-level anti-spam gates (keep simple, in-memory)
+OPEN_TICKET_GATE_SECONDS = int(os.getenv("OPEN_TICKET_GATE_SECONDS", "5"))
+TICKET_OPEN_COOLDOWN_SECONDS = int(os.getenv("TICKET_OPEN_COOLDOWN_SECONDS", "60"))
+OPEN_TICKETS_PER_USER_LIMIT = int(os.getenv("OPEN_TICKETS_PER_USER_LIMIT", "1"))
+
+_OPEN_GATES: Dict[str, float] = {}
+_USER_CATEGORY_COOLDOWNS: Dict[str, float] = {}
+
+def _gate_key(guild_id: int, user_id: int) -> str:
+    return f"{guild_id}:{user_id}"
+
+def _cd_key(guild_id: int, category_id: int, user_id: int) -> str:
+    return f"{guild_id}:{category_id}:{user_id}"
+
 
 def ensure_data_dir():
     d = os.path.dirname(DB_PATH)
@@ -799,6 +813,58 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
         guild = interaction.guild
         cfg = get_config(guild.id)
 
+        # Simple anti-spam: per-user short gate
+        try:
+            gk = _gate_key(guild.id, interaction.user.id)
+            now = time.time()
+            if OPEN_TICKET_GATE_SECONDS > 0:
+                exp = _OPEN_GATES.get(gk)
+                if exp and now < exp:
+                    await interaction.followup.send("You're doing that too fast. Please wait a few seconds and try again.", ephemeral=True)
+                    return
+                _OPEN_GATES[gk] = now + OPEN_TICKET_GATE_SECONDS
+        except Exception:
+            pass
+
+        # Limit max open tickets per user (default 1)
+        try:
+            if OPEN_TICKETS_PER_USER_LIMIT > 0:
+                conn = get_conn()
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT COUNT(1) FROM tickets WHERE guild_id = ? AND opener_id = ? AND status != 'closed'",
+                    (guild.id, interaction.user.id),
+                )
+                row = cur.fetchone()
+                conn.close()
+                count_open = int(row[0]) if row else 0
+                if count_open >= OPEN_TICKETS_PER_USER_LIMIT:
+                    await interaction.followup.send(
+                        f"You already have {count_open} open ticket(s). Please close an existing ticket before opening another.",
+                        ephemeral=True,
+                    )
+                    return
+        except Exception:
+            pass
+
+        # Per-category per-user cooldown (default 60s)
+        try:
+            if TICKET_OPEN_COOLDOWN_SECONDS > 0:
+                ck = _cd_key(guild.id, int(self.category_row["id"]), interaction.user.id)
+                now = time.time()
+                exp = _USER_CATEGORY_COOLDOWNS.get(ck)
+                if exp and now < exp:
+                    remaining = int(exp - now)
+                    mins, secs = divmod(max(1, remaining), 60)
+                    pretty = (f"{mins}m {secs}s" if mins else f"{secs}s")
+                    await interaction.followup.send(
+                        f"Ticket cooldown active for this category. Try again in {pretty}.",
+                        ephemeral=True,
+                    )
+                    return
+        except Exception:
+            pass
+
         # Queue number based on current open tickets (+1), under a short lock
         num = reserve_open_ticket_number(guild.id)
         # Default priority is Low; can be changed after channel opens via button or admin command
@@ -824,6 +890,16 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
             parent = guild.get_channel(int(cfg["ticket_category_id"]))
             if not isinstance(parent, discord.CategoryChannel):
                 parent = None
+            else:
+                try:
+                    if len(parent.channels) >= 50:
+                        await interaction.followup.send(
+                            "The ticket category is full right now. Please try again later.",
+                            ephemeral=True,
+                        )
+                        return
+                except Exception:
+                    pass
 
         try:
             try:
@@ -919,6 +995,14 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
             cur.execute("UPDATE tickets SET first_message_id = ? WHERE id = ?", (first_msg_id, ticket_id))
         conn.commit()
         conn.close()
+
+        # Start per-category cooldown for this user
+        try:
+            if TICKET_OPEN_COOLDOWN_SECONDS > 0:
+                ck = _cd_key(guild.id, int(self.category_row["id"]), interaction.user.id)
+                _USER_CATEGORY_COOLDOWNS[ck] = time.time() + TICKET_OPEN_COOLDOWN_SECONDS
+        except Exception:
+            pass
 
         try:
             await interaction.followup.send(
