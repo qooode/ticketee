@@ -1019,13 +1019,6 @@ intents.message_content = True  # Needed to log ticket messages
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Do not wait on long rate limits; fail fast so user can retry
-try:
-    # If supported by discord.py, prevents long sleeps on 429
-    bot.http.max_ratelimit_timeout = 0.0  # type: ignore[attr-defined]
-except Exception:
-    pass
-
 # Optionally reduce noisy rate limit warnings from the library
 try:
     logging.getLogger("discord.http").setLevel(logging.ERROR)
