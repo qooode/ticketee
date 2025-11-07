@@ -1,0 +1,31 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="card">
+  <h2 style="margin-top:0">Guilds</h2>
+  {% if guilds and guilds|length > 0 %}
+  <table>
+    <thead>
+      <tr><th>Guild ID</th><th>Categories</th><th>Open Tickets</th><th>Total Tickets</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for g in guilds %}
+      <tr>
+        <td>{{ g.guild_id }}</td>
+        <td>{{ g.categories }}</td>
+        <td>{{ g.open_tickets }}</td>
+        <td>{{ g.total_tickets }}</td>
+        <td><a class="btn btn-secondary" href="/guild/{{ g.guild_id }}">Manage</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p>No guilds found. Create a ticket or set config from the bot first.</p>
+  {% endif %}
+  <p><small>This dashboard reads and writes directly to SQLite.</small></p>
+  <p><small>DB path: {{ DB_PATH }}</small></p>
+  <p><small>Keep this service bound to localhost or behind a reverse proxy with TLS.</small></p>
+  
+</div>
+{% endblock %}
+

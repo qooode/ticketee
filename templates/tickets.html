@@ -1,0 +1,42 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="card">
+  <h2 style="margin-top:0">Guild {{ guild_id }} — Tickets</h2>
+  {% if tickets and tickets|length > 0 %}
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Ticket ID</th>
+        <th>Channel ID</th>
+        <th>Opener</th>
+        <th>Status</th>
+        <th>Priority</th>
+        <th>Created</th>
+        <th>Closed</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for t in tickets %}
+      <tr>
+        <td>{{ t.ticket_number }}</td>
+        <td>{{ t.id }}</td>
+        <td>{{ t.channel_id }}</td>
+        <td>{{ t.opener_id }}</td>
+        <td>{{ t.status }}</td>
+        <td>{{ t.priority }}</td>
+        <td>{{ t.created_at }}</td>
+        <td>{{ t.closed_at or '' }}</td>
+        <td><a class="btn btn-secondary" href="/ticket/{{ t.id }}">Open</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p>No tickets.</p>
+  {% endif %}
+  <p><a href="/guild/{{ guild_id }}">Back to guild</a></p>
+</div>
+{% endblock %}
+
