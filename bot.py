@@ -978,10 +978,19 @@ class TicketModal(discord.ui.Modal, title="Support Ticket"):
                 embed.add_field(name=label, value=item.value or "(blank)", inline=False)
 
         # Intro text (mention opener so they get a ping in the channel)
-        intro = (
-            f"{interaction.user.mention} Thanks for reaching out! A staff member will respond as soon as possible.\n"
-            "Use 'Set Priority' to change urgency, or 'Mark as Solved' if resolved. Staff will confirm closing."
-        )
+        # Tailor instructions based on what the opener is allowed to do
+        user_is_staff_or_admin = is_admin(interaction.user) or is_staff(interaction.user, cfg)  # type: ignore
+        can_change_priority = user_is_staff_or_admin
+        can_mark_solved = True  # the opener can always mark as solved
+
+        lines = [
+            f"{interaction.user.mention} Thanks for reaching out! A staff member will respond as soon as possible."
+        ]
+        if can_change_priority:
+            lines.append("Use 'Set Priority' to change urgency.")
+        if can_mark_solved:
+            lines.append("Use 'Mark as Solved' if the issue is resolved.")
+        intro = "\n".join(lines)
 
         view = TicketView()
         first_msg_id: Optional[int] = None
